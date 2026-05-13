@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import shutil
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -12,141 +13,18 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-
-def convert_lr_to_epic(file_path, output_base_dir):
-    """
-    Converts LR metadata from .dat format to EPIC log format and appends it to LR.txt
-    inside the correct dated folder. Adds a header if the file doesn't exist yet.
-    """
-
-
-    try:
-        base, _ = os.path.splitext(file_path)
-        meta_dest = base + "_metadata.xml"
-        if os.path.isfile(SETTINGS_XML_PATH):
-            shutil.copy2(SETTINGS_XML_PATH, meta_dest)
-            logging.info(f"Copied settings.xml to metadata file: {meta_dest}")
-        else:
-            logging.warning(
-                f"settings.xml not found at {SETTINGS_XML_PATH}; "
-                f"cannot create metadata snapshot for {file_path}"
-            )
-    except Exception as e:
-        logging.error(f"Failed to copy settings.xml for {file_path}: {e}")
-
-
-
-
-    try:
-        base_time = datetime.fromtimestamp(os.path.getctime(file_path))
-
-        with open(file_path, 'r') as f:
-            lines = f.readlines()
-
-        converted_lines = []
-        for line in lines:
-            parts = line.strip().split("\t")
-            if len(parts) != 2:
-                continue
-            try:
-                time_offset = float(parts[0])
-                intensity = parts[1]
-
-                new_time = base_time + timedelta(seconds=time_offset)
-                formatted_time = new_time.strftime("%d/%m/%Y %H:%M:%S.%f")
-
-                converted_line = f"{formatted_time},{intensity}\n"
-                converted_lines.append(converted_line)
-
-            except ValueError:
-                logging.warning(f"Skipping invalid line: {line.strip()} in file {file_path}")
-
-        now = datetime.now()
-        year_str = now.strftime("%Y")
-        date_str = now.strftime("%Y_%m_%d")
-        dated_output_dir = os.path.join(output_base_dir, year_str, date_str)
-        os.makedirs(dated_output_dir, exist_ok=True)
-
-        output_file_path = os.path.join(dated_output_dir, "LR.txt")
-
-        # Check
-        file_exists = os.path.isfile(output_file_path)
-
-        # Write
-        with open(output_file_path, 'a') as f:
-            if not file_exists:
-                f.write("EPIC LR Log File\n\n")
-                f.write("Date,LR\n")
-            f.writelines(converted_lines)
-
-        logging.info(f"Appended converted data to: {output_file_path}")
-
-    except Exception as e:
-        logging.error(f"Failed to convert file {file_path}: {e}")
-
-
-class LRMetaDataHandler(FileSystemEventHandler):
-    def __init__(self, output_dir, inactivity_period=30):
-        self.output_dir = output_dir
-        self.inactivity_period = inactivity_period
-        self.file_timestamps = {}
-
-    def on_modified(self, event):
-        if event.src_path.endswith('.dat'):
-            self.file_timestamps[event.src_path] = time.time()
-
-    def check_and_process_files(self):
-        current_time = time.time()
-        files_to_process = []
-
-        for file_path, last_modified in list(self.file_timestamps.items()):
-            logging.info(f"Checking file: {file_path}, last modified: {last_modified}")
-            if current_time - last_modified > self.inactivity_period:
-                files_to_process.append(file_path)
-
-        for file_path in files_to_process:
-            logging.info(f"Processing file: {file_path}")
-            try:
-                convert_lr_to_epic(file_path, self.output_dir)
-                del self.file_timestamps[file_path]
-            except Exception as e:
-                logging.error(f"Error processing {file_path}: {e}")
-
-
-if __name__ == "__main__":
-    lr_meta_dir = r"d:\PDIRS"
-    epic_logs_dir = r"c:\EPIC\Latest\Logs"
-    SETTINGS_XML_PATH = r"F:\PDI Reflectance Monitor\settings.xml"
-    inactivity_period = 20
-
-    try:
-        event_handler = LRMetaDataHandler(output_dir=epic_logs_dir, inactivity_period=inactivity_period)
-        observer = Observer()
-        observer.schedule(event_handler, path=lr_meta_dir, recursive=False)
-        observer.start()
-
-        logging.info("Started watchdog. Monitoring for new .dat files...")
-
-        while True:
-            event_handler.check_and_process_files()
-            time.sleep(5)
-
-    except Exception as e:
-        logging.error(f"Watchdog crashed: {e}")
-        time.sleep(5)
-
-
-#  EXTRA CODE: settings.xml logic
-import xml.etree.ElementTree as ET
-import shutil
-
+# ── Configuration (PDI Lab PC) ─────────────────────────────────────────────
+LR_META_DIR       = r"d:\PDIRS"               #  source folder
+EPIC_LOGS_DIR     = r"c:\EPIC\Latest\Logs"    #  destination folder
 SETTINGS_XML_PATH = r"F:\PDI Reflectance Monitor\settings.xml"
+INACTIVITY_PERIOD = 20                      
+# ───────────────────────────────────────────────────────────────────────────
 
 
 def _parse_float_from_text(text, default="NA"):
     """
-    Parse a float from scientific-notation string, return a clean string
-    (integer if close to int, else compact float). On failure, return default.
+    Parse a float from a scientific-notation string and return a clean string.
+    Returns default if parsing fails.
     """
     try:
         value = float(str(text).strip())
@@ -161,105 +39,159 @@ def _parse_float_from_text(text, default="NA"):
 def _read_settings_values():
     """
     Read laser wavelength and measurement angle from settings.xml.
-
-    XML example:
-      <settings>
-        <settings.defaultPath>D:\PDIRS</settings.defaultPath>
-        <settings.laserWavelength>6.400000000E+2</settings.laserWavelength>
-        <settings.measurementAngle>6.000000000E+1</settings.measurementAngle>
-        ...
-      </settings>
-
     Returns: (wavelength_str, angle_str)
     """
     try:
         tree = ET.parse(SETTINGS_XML_PATH)
         root = tree.getroot()
-
-        wl_text = root.findtext("./settings.laserWavelength")
-        ang_text = root.findtext("./settings.measurementAngle")
-
-        wl_str = _parse_float_from_text(wl_text)
-        ang_str = _parse_float_from_text(ang_text)
-
+        wl_str  = _parse_float_from_text(root.findtext("./settings.laserWavelength"))
+        ang_str = _parse_float_from_text(root.findtext("./settings.measurementAngle"))
         return wl_str, ang_str
     except Exception as e:
         logging.error(f"Failed to read settings.xml at {SETTINGS_XML_PATH}: {e}")
         return "NA", "NA"
 
 
-_original_convert_lr_to_epic = convert_lr_to_epic
-
-
 def convert_lr_to_epic(file_path, output_base_dir):
     """
-    Wrapper around your original convert_lr_to_epic.
-
-    - Calls the original function to generate/append LR.txt.
-    - Copies settings.xml next to the .dat as FILENAME_metadata.xml.
-    - If LR.txt is newly created for that date, enriches the header with
-      LaserWavelength_nm and IncidenceAngle_deg from settings.xml.
+    Converts a .dat file to EPIC log format and writes/appends to LR.txt.
+    Also writes LR_meta.txt and copies settings.xml next to the source file.
     """
+    now = datetime.now()
 
+    # ── Build output paths ───────────────────────────────────────────────────
     try:
-        now = datetime.now()
-        year_str = now.strftime("%Y")
-        date_str = now.strftime("%Y_%m_%d")
-        dated_output_dir = os.path.join(output_base_dir, year_str, date_str)
+        dated_output_dir = os.path.join(
+            output_base_dir,
+            now.strftime("%Y"),
+            now.strftime("%Y_%m_%d")
+        )
+        os.makedirs(dated_output_dir, exist_ok=True)
+
         output_file_path = os.path.join(dated_output_dir, "LR.txt")
+        meta_log_path    = os.path.join(dated_output_dir, "LR_meta.txt")
+
         file_exists_before = os.path.isfile(output_file_path)
-    except Exception:
-        output_file_path = None
-        file_exists_before = False
-
-    _original_convert_lr_to_epic(file_path, output_base_dir)
-
-    try:
-        base, _ = os.path.splitext(file_path)
-        meta_dest = base + "_metadata.xml"
-        if os.path.isfile(SETTINGS_XML_PATH):
-            shutil.copy2(SETTINGS_XML_PATH, meta_dest)
-            logging.info(f"Copied settings.xml to metadata file: {meta_dest}")
-        else:
-            logging.warning(
-                f"settings.xml not found at {SETTINGS_XML_PATH}; "
-                f"cannot create metadata snapshot for {file_path}"
-            )
+        meta_exists_before = os.path.isfile(meta_log_path)
     except Exception as e:
-        logging.error(f"Failed to copy settings.xml for {file_path}: {e}")
+        logging.error(f"Failed to build output paths: {e}")
+        return
 
+    # ── 1. Convert .dat and append to LR.txt ─────────────────────────────────
     try:
-        if output_file_path is not None and (not file_exists_before) and os.path.isfile(output_file_path):
-            wl, ang = _read_settings_values()
+        base_time = datetime.fromtimestamp(os.path.getctime(file_path))
 
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+
+        converted_lines = []
+        for line in lines:
+            parts = line.strip().split("\t")
+            if len(parts) != 2:
+                continue
+            try:
+                new_time = base_time + timedelta(seconds=float(parts[0]))
+                converted_lines.append(
+                    f"{new_time.strftime('%d/%m/%Y %H:%M:%S.%f')},{parts[1]}\n"
+                )
+            except ValueError:
+                logging.warning(f"Skipping invalid line: {line.strip()} in {file_path}")
+
+        with open(output_file_path, 'a') as f:
+            if not file_exists_before:
+                f.write("EPIC LR Log File\n\n")
+                f.write("Date,LR\n")
+            f.writelines(converted_lines)
+
+        logging.info(f"Appended converted data to: {output_file_path}")
+
+    except Exception as e:
+        logging.error(f"Failed to convert file {file_path}: {e}")
+        return
+
+    # ── 2. Read settings ──────────────────────────────────────────────────────
+    wl, ang = _read_settings_values()
+
+    # ── 3. Enrich LR.txt header if newly created ──────────────────────────────
+    try:
+        if not file_exists_before and os.path.isfile(output_file_path):
             with open(output_file_path, "r") as f:
                 lines = f.readlines()
-
-            header_index = None
-            for i, line in enumerate(lines):
-                if line.strip().startswith("Date,LR"):
-                    header_index = i
-                    break
-
-            if header_index is not None:
+            header_index = next(
+                (i for i, l in enumerate(lines) if "Date,LR" in l), -1
+            )
+            if header_index != -1:
                 data_lines = lines[header_index + 1:]
-
-
                 with open(output_file_path, "w") as f:
                     f.write("EPIC LR Log File\n\n")
                     f.write(f"LaserWavelength_nm: {wl}\n")
                     f.write(f"IncidenceAngle_deg: {ang}\n\n")
                     f.write("Date,LR\n")
                     f.writelines(data_lines)
-
-                logging.info(
-                    f"Updated LR.txt header with settings.xml data: "
-                    f"wavelength={wl}, angle={ang}"
-                )
-            else:
-                logging.warning(
-                    f"Could not find 'Date,LR' header line in {output_file_path}; "
-                    f"leaving file unchanged."
-                )
+                logging.info(f"Enriched LR.txt header: wavelength={wl}, angle={ang}")
     except Exception as e:
-        logging.error(f"Failed to update LR.txt header for {output_file_path}: {e}")
+        logging.error(f"Header update failed: {e}")
+
+    # ── 4. Append to LR_meta.txt ──────────────────────────────────────────────
+    try:
+        with open(meta_log_path, 'a') as f_meta:
+            if not meta_exists_before:
+                f_meta.write("EPIC LR_metadata Log File\n\n")
+                f_meta.write("Date,LR_wavelength_nm,LR_angle_deg\n")
+            f_meta.write(f"{now.strftime('%d/%m/%Y %H:%M:%S.%f')},{wl},{ang}\n")
+        logging.info(f"Updated metadata log: {meta_log_path}")
+    except Exception as e:
+        logging.error(f"Failed to update LR_meta.txt: {e}")
+
+    # ── 5. Copy settings.xml next to the source .dat file ────────────────────
+    try:
+        base, _ = os.path.splitext(file_path)
+        shutil.copy2(SETTINGS_XML_PATH, base + "_metadata.xml")
+        logging.info(f"Copied settings.xml to: {base}_metadata.xml")
+    except Exception as e:
+        logging.error(f"Metadata XML copy failed: {e}")
+
+
+class LRMetaDataHandler(FileSystemEventHandler):
+    def __init__(self, output_dir, inactivity_period=30):
+        self.output_dir = output_dir
+        self.inactivity_period = inactivity_period
+        self.file_timestamps = {}
+
+    def on_modified(self, event):
+        if event.src_path.endswith('.dat'):
+            self.file_timestamps[event.src_path] = time.time()
+
+    def check_and_process_files(self):
+        current_time = time.time()
+        files_to_process = [
+            fp for fp, ts in list(self.file_timestamps.items())
+            if current_time - ts > self.inactivity_period
+        ]
+        for file_path in files_to_process:
+            logging.info(f"Processing file: {file_path}")
+            try:
+                convert_lr_to_epic(file_path, self.output_dir)
+                del self.file_timestamps[file_path]
+            except Exception as e:
+                logging.error(f"Error processing {file_path}: {e}")
+
+
+if __name__ == "__main__":
+    try:
+        event_handler = LRMetaDataHandler(
+            output_dir=EPIC_LOGS_DIR,
+            inactivity_period=INACTIVITY_PERIOD
+        )
+        observer = Observer()
+        observer.schedule(event_handler, path=LR_META_DIR, recursive=False)
+        observer.start()
+        logging.info("Started watchdog. Monitoring for new .dat files...")
+
+        while True:
+            event_handler.check_and_process_files()
+            time.sleep(5)
+
+    except Exception as e:
+        logging.error(f"Watchdog crashed: {e}")
+        time.sleep(5)
