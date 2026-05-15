@@ -13,12 +13,21 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# ── Configuration (PDI Lab PC) ─────────────────────────────────────────────
-LR_META_DIR       = r"d:\PDIRS"               #  source folder
-EPIC_LOGS_DIR     = r"c:\EPIC\Latest\Logs"    #  destination folder
-SETTINGS_XML_PATH = r"F:\PDI Reflectance Monitor\settings.xml"
-INACTIVITY_PERIOD = 20                      
-# ───────────────────────────────────────────────────────────────────────────
+# # ── Configuration ─────────────────────────────────────────────
+# LR_META_DIR       = r"d:\PDIRS"               #  source folder
+# EPIC_LOGS_DIR     = r"c:\EPIC\Latest\Logs"    #  destination folder
+# SETTINGS_XML_PATH = r"F:\PDI Reflectance Monitor\settings.xml"
+# INACTIVITY_PERIOD = 20                      
+# # ───────────────────────────────────────────────────────────────────────────
+
+# ── Configuration for my local────────────────────────────────────────────────────────────
+
+LR_META_DIR      = r"source"                 # Folder to watch for .dat files
+EPIC_LOGS_DIR    = r"destination"            # Where LR.txt / LR_meta.txt go
+SETTINGS_XML_PATH = r"source\settings.xml"  # Instrument settings file
+INACTIVITY_PERIOD = 5                        # Seconds of inactivity before processing
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _parse_float_from_text(text, default="NA"):
@@ -57,6 +66,13 @@ def convert_lr_to_epic(file_path, output_base_dir):
     Converts a .dat file to EPIC log format and writes/appends to LR.txt.
     Also writes LR_meta.txt and copies settings.xml next to the source file.
     """
+    # ── NEW: Define base_time immediately from the file ──────────────────────
+    try:
+        base_time = datetime.fromtimestamp(os.path.getctime(file_path))
+    except Exception as e:
+        logging.error(f"Failed to get base_time for {file_path}: {e}")
+        base_time = datetime.now() # Fallback
+
     now = datetime.now()
 
     # ── Build output paths ───────────────────────────────────────────────────
@@ -79,8 +95,7 @@ def convert_lr_to_epic(file_path, output_base_dir):
 
     # ── 1. Convert .dat and append to LR.txt ─────────────────────────────────
     try:
-        base_time = datetime.fromtimestamp(os.path.getctime(file_path))
-
+        # Note: base_time is now defined above
         with open(file_path, 'r') as f:
             lines = f.readlines()
 
@@ -138,8 +153,11 @@ def convert_lr_to_epic(file_path, output_base_dir):
             if not meta_exists_before:
                 f_meta.write("EPIC LR_metadata Log File\n\n")
                 f_meta.write("Date,LR_wavelength_nm,LR_angle_deg\n")
-            f_meta.write(f"{now.strftime('%d/%m/%Y %H:%M:%S.%f')},{wl},{ang}\n")
-        logging.info(f"Updated metadata log: {meta_log_path}")
+            
+            # CHANGE: Use base_time.strftime instead of now.strftime
+            f_meta.write(f"{base_time.strftime('%d/%m/%Y %H:%M:%S.%f')},{wl},{ang}\n")
+            
+        logging.info(f"Updated metadata log with base_time: {meta_log_path}")
     except Exception as e:
         logging.error(f"Failed to update LR_meta.txt: {e}")
 
