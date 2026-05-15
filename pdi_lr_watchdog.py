@@ -13,21 +13,13 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# # ── Configuration ─────────────────────────────────────────────
-# LR_META_DIR       = r"d:\PDIRS"               #  source folder
-# EPIC_LOGS_DIR     = r"c:\EPIC\Latest\Logs"    #  destination folder
-# SETTINGS_XML_PATH = r"F:\PDI Reflectance Monitor\settings.xml"
-# INACTIVITY_PERIOD = 20                      
-# # ───────────────────────────────────────────────────────────────────────────
+# ── Configuration ─────────────────────────────────────────────
+LR_META_DIR       = r"d:\PDIRS"               #  source folder
+EPIC_LOGS_DIR     = r"c:\EPIC\Latest\Logs"    #  destination folder
+SETTINGS_XML_PATH = r"F:\PDI Reflectance Monitor\settings.xml"
+INACTIVITY_PERIOD = 20                      
+# ───────────────────────────────────────────────────────────────────────────
 
-# ── Configuration for my local────────────────────────────────────────────────────────────
-
-LR_META_DIR      = r"source"                 # Folder to watch for .dat files
-EPIC_LOGS_DIR    = r"destination"            # Where LR.txt / LR_meta.txt go
-SETTINGS_XML_PATH = r"source\settings.xml"  # Instrument settings file
-INACTIVITY_PERIOD = 5                        # Seconds of inactivity before processing
-
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _parse_float_from_text(text, default="NA"):
