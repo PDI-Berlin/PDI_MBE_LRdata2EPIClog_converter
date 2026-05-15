@@ -95,7 +95,6 @@ def convert_lr_to_epic(file_path, output_base_dir):
 
     # ── 1. Convert .dat and append to LR.txt ─────────────────────────────────
     try:
-        # Note: base_time is now defined above
         with open(file_path, 'r') as f:
             lines = f.readlines()
 
@@ -161,13 +160,25 @@ def convert_lr_to_epic(file_path, output_base_dir):
     except Exception as e:
         logging.error(f"Failed to update LR_meta.txt: {e}")
 
-    # ── 5. Copy settings.xml next to the source .dat file ────────────────────
+    # ── 5. Copy settings.xml with precise timestamp in filename ──────────────
     try:
-        base, _ = os.path.splitext(file_path)
-        shutil.copy2(SETTINGS_XML_PATH, base + "_metadata.xml")
-        logging.info(f"Copied settings.xml to: {base}_metadata.xml")
+        original_filename = os.path.basename(file_path)
+        name_part, _ = os.path.splitext(original_filename)
+        seconds_str = base_time.strftime("%S")
+        
+        if len(name_part) >= 10 and name_part[:10].isdigit():
+            new_meta_name = f"{name_part[:10]}{seconds_str}{name_part[10:]}_metadata.xml"
+        else:
+            new_meta_name = f"{name_part}_{seconds_str}_metadata.xml"
+
+        source_dir = os.path.dirname(file_path)
+        meta_dest_path = os.path.join(source_dir, new_meta_name)
+
+        shutil.copy2(SETTINGS_XML_PATH, meta_dest_path)
+        logging.info(f"Copied settings.xml to precise metadata file: {new_meta_name}")
+        
     except Exception as e:
-        logging.error(f"Metadata XML copy failed: {e}")
+        logging.error(f"Failed to create precise metadata XML copy: {e}")
 
 
 class LRMetaDataHandler(FileSystemEventHandler):
