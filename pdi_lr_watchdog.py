@@ -22,6 +22,7 @@ INACTIVITY_PERIOD = 20
 
 
 
+
 def _parse_float_from_text(text, default="NA"):
     """
     Parse a float from a scientific-notation string and return a clean string.
@@ -55,122 +56,96 @@ def _read_settings_values():
 
 def convert_lr_to_epic(file_path, output_base_dir):
     """
-    Converts a .dat file to EPIC log format and writes/appends to LR.txt.
-    Also writes LR_meta.txt and copies settings.xml next to the source file.
+    Converts a .dat file to EPIC log format. Splits data into multiple 
+    daily LR.txt files if the experiment spans across midnight.
     """
-    # ── NEW: Define base_time immediately from the file ──────────────────────
     try:
         base_time = datetime.fromtimestamp(os.path.getctime(file_path))
     except Exception as e:
         logging.error(f"Failed to get base_time for {file_path}: {e}")
-        base_time = datetime.now() # Fallback
+        base_time = datetime.now()
 
-    now = datetime.now()
-
-    # ── Build output paths ───────────────────────────────────────────────────
-    try:
-        dated_output_dir = os.path.join(
-            output_base_dir,
-            now.strftime("%Y"),
-            now.strftime("%Y_%m_%d")
-        )
-        os.makedirs(dated_output_dir, exist_ok=True)
-
-        output_file_path = os.path.join(dated_output_dir, "LR.txt")
-        meta_log_path    = os.path.join(dated_output_dir, "LR_meta.txt")
-
-        file_exists_before = os.path.isfile(output_file_path)
-        meta_exists_before = os.path.isfile(meta_log_path)
-    except Exception as e:
-        logging.error(f"Failed to build output paths: {e}")
-        return
-
-    # ── 1. Convert .dat and append to LR.txt ─────────────────────────────────
+    # ── 1. Read and Split Data by Day ────────────────────────────────────────
     try:
         with open(file_path, 'r') as f:
             lines = f.readlines()
 
-        converted_lines = []
+        data_by_day = {}
+
         for line in lines:
             parts = line.strip().split("\t")
             if len(parts) != 2:
                 continue
             try:
-                new_time = base_time + timedelta(seconds=float(parts[0]))
-                converted_lines.append(
-                    f"{new_time.strftime('%d/%m/%Y %H:%M:%S.%f')},{parts[1]}\n"
-                )
+                # Calculate the timestamp for this specific line
+                line_time = base_time + timedelta(seconds=float(parts[0]))
+                day_key = line_time.strftime("%Y_%m_%d")
+                year_key = line_time.strftime("%Y")
+                
+                # Format the line for EPIC
+                formatted_line = f"{line_time.strftime('%d/%m/%Y %H:%M:%S.%f')},{parts[1]}\n"
+                
+                if day_key not in data_by_day:
+                    data_by_day[day_key] = {"year": year_key, "lines": []}
+                
+                data_by_day[day_key]["lines"].append(formatted_line)
             except ValueError:
-                logging.warning(f"Skipping invalid line: {line.strip()} in {file_path}")
+                continue
 
-        with open(output_file_path, 'a') as f:
-            if not file_exists_before:
-                f.write("EPIC LR Log File\n\n")
-                f.write("Date,LR\n")
-            f.writelines(converted_lines)
+        # ── 2. Write to the respective daily files ───────────────────────────
+        for day_str, info in data_by_day.items():
+            dated_output_dir = os.path.join(output_base_dir, info["year"], day_str)
+            os.makedirs(dated_output_dir, exist_ok=True)
+            
+            output_file_path = os.path.join(dated_output_dir, "LR.txt")
+            file_exists = os.path.isfile(output_file_path)
 
-        logging.info(f"Appended converted data to: {output_file_path}")
+            with open(output_file_path, 'a') as f:
+                if not file_exists:
+                    f.write("EPIC LR Log File\n\n")
+                    f.write("Date,LR\n")
+                f.writelines(info["lines"])
+            
+            logging.info(f"Appended {len(info['lines'])} lines to {output_file_path}")
 
     except Exception as e:
-        logging.error(f"Failed to convert file {file_path}: {e}")
+        logging.error(f"Failed to process multi-day file {file_path}: {e}")
         return
 
-    # ── 2. Read settings ──────────────────────────────────────────────────────
+    # ── 3. Handle Metadata ──────
     wl, ang = _read_settings_values()
+    
+    start_day_dir = os.path.join(
+        output_base_dir, 
+        base_time.strftime("%Y"), 
+        base_time.strftime("%Y_%m_%d")
+    )
+    os.makedirs(start_day_dir, exist_ok=True)
+    
+    meta_log_path = os.path.join(start_day_dir, "LR_meta.txt")
+    meta_exists = os.path.isfile(meta_log_path)
 
-    # ── 3. Enrich LR.txt header if newly created ──────────────────────────────
-    try:
-        if not file_exists_before and os.path.isfile(output_file_path):
-            with open(output_file_path, "r") as f:
-                lines = f.readlines()
-            header_index = next(
-                (i for i, l in enumerate(lines) if "Date,LR" in l), -1
-            )
-            if header_index != -1:
-                data_lines = lines[header_index + 1:]
-                with open(output_file_path, "w") as f:
-                    f.write("EPIC LR Log File\n\n")
-                    f.write(f"LaserWavelength_nm: {wl}\n")
-                    f.write(f"IncidenceAngle_deg: {ang}\n\n")
-                    f.write("Date,LR\n")
-                    f.writelines(data_lines)
-                logging.info(f"Enriched LR.txt header: wavelength={wl}, angle={ang}")
-    except Exception as e:
-        logging.error(f"Header update failed: {e}")
-
-    # ── 4. Append to LR_meta.txt ──────────────────────────────────────────────
     try:
         with open(meta_log_path, 'a') as f_meta:
-            if not meta_exists_before:
+            if not meta_exists:
                 f_meta.write("EPIC LR_metadata Log File\n\n")
                 f_meta.write("Date,LR_wavelength_nm,LR_angle_deg\n")
-            
-            # CHANGE: Use base_time.strftime instead of now.strftime
             f_meta.write(f"{base_time.strftime('%d/%m/%Y %H:%M:%S.%f')},{wl},{ang}\n")
-            
-        logging.info(f"Updated metadata log with base_time: {meta_log_path}")
     except Exception as e:
-        logging.error(f"Failed to update LR_meta.txt: {e}")
+        logging.error(f"Meta log update failed: {e}")
 
-    # ── 5. Copy settings.xml with precise timestamp in filename ──────────────
+    # ── 4. Precise XML Snapshot ────────────────────
     try:
-        original_filename = os.path.basename(file_path)
-        name_part, _ = os.path.splitext(original_filename)
+        name_part, _ = os.path.splitext(os.path.basename(file_path))
         seconds_str = base_time.strftime("%S")
-        
         if len(name_part) >= 10 and name_part[:10].isdigit():
             new_meta_name = f"{name_part[:10]}{seconds_str}{name_part[10:]}_metadata.xml"
         else:
             new_meta_name = f"{name_part}_{seconds_str}_metadata.xml"
-
-        source_dir = os.path.dirname(file_path)
-        meta_dest_path = os.path.join(source_dir, new_meta_name)
-
-        shutil.copy2(SETTINGS_XML_PATH, meta_dest_path)
-        logging.info(f"Copied settings.xml to precise metadata file: {new_meta_name}")
         
+        shutil.copy2(SETTINGS_XML_PATH, os.path.join(os.path.dirname(file_path), new_meta_name))
     except Exception as e:
-        logging.error(f"Failed to create precise metadata XML copy: {e}")
+        logging.error(f"XML copy failed: {e}")
 
 
 class LRMetaDataHandler(FileSystemEventHandler):
