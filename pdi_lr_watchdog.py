@@ -254,7 +254,7 @@ class LRMetaDataHandler(FileSystemEventHandler):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="pdi_lr_convert",
+        prog="python pdi_lr_watchdog.py",
         description="Convert PDI .dat files to EPIC log format."
     )
     
