@@ -22,20 +22,21 @@ if os.path.exists(r"d:\PDIRS"):
     DEFAULT_LR_META_DIR    = r"d:\PDIRS"               
     DEFAULT_EPIC_LOGS_DIR  = r"c:\EPIC\Latest\Logs"    
     DEFAULT_SETTINGS_XML   = r"F:\PDI Reflectance Monitor\settings.xml"
-    INACTIVITY_PERIOD      = 20                        
+    INACTIVITY_PERIOD      = 20       # Seconds of silence before reading new lines                 
+    ARCHIVE_AGE_THRESHOLD  = 300      # 5 minutes of silence before moving file to /processed/
 else:
     # 💻 DEVELOPMENT (Your Local Simulation Settings)
     DEFAULT_LR_META_DIR    = r"source"                 
     DEFAULT_EPIC_LOGS_DIR  = r"destination"            
     DEFAULT_SETTINGS_XML   = r"source\settings.xml"    
     INACTIVITY_PERIOD      = 5                         
+    ARCHIVE_AGE_THRESHOLD  = 15       # Quick cutoff for laptop testing
 # ───────────────────────────────────────────────────────────────────────────
 
 
 def _parse_float_from_text(text, default="NA"):
     """
     Parse a float from a scientific-notation string and return a clean string.
-    Returns default if parsing fails.
     """
     try:
         value = float(str(text).strip())
@@ -50,7 +51,6 @@ def _parse_float_from_text(text, default="NA"):
 def _read_settings_values(settings_xml_path):
     """
     Read laser wavelength and measurement angle from the specified settings.xml path.
-    Returns: (wavelength_str, angle_str)
     """
     try:
         tree = ET.parse(settings_xml_path)
@@ -66,8 +66,6 @@ def _read_settings_values(settings_xml_path):
 def calculate_base_time(file_path, method="tc"):
     """
     Calculates the absolute experiment start time (base_time).
-    'tc': Uses OS file creation time.
-    'tm': Uses OS file modification time minus the last entry's relative offset.
     """
     if method == "tm":
         logging.warning("Using -tm assumes file modification time precisely equals experiment end time.")
@@ -78,7 +76,6 @@ def calculate_base_time(file_path, method="tc"):
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 lines = f.readlines()
             
-            # Loop backwards to find the last valid data row containing a timestamp offset
             for line in reversed(lines):
                 parts = line.strip().split("\t")
                 if len(parts) == 2:
@@ -95,7 +92,6 @@ def calculate_base_time(file_path, method="tc"):
             logging.error(f"Failed calculating -tm for {file_path} ({e}). Falling back to creation time.")
             print(f"Warning: Failed calculating -tm ({e}). Falling back to creation time.")
 
-    # Default 'tc' behavior
     try:
         return datetime.fromtimestamp(os.path.getctime(file_path))
     except Exception as e:
@@ -103,25 +99,29 @@ def calculate_base_time(file_path, method="tc"):
         return datetime.now()
 
 
-def convert_lr_to_epic(file_path, output_base_dir, settings_xml_path, timing_method="tc"):
+def convert_lr_to_epic(file_path, output_base_dir, settings_xml_path, timing_method="tc", line_offset=0, base_time=None):
     """
-    Converts a .dat file to EPIC log format. Splits data into multiple 
-    daily LR.txt files if the experiment spans across midnight.
+    Converts only the NEW lines of a .dat file to EPIC log format starting from line_offset.
     """
-    # Calculate start time dynamically based on the chosen timing flag
-    base_time = calculate_base_time(file_path, method=timing_method)
-
-    # Read instrument metadata settings up front for headers and backups
+    # ── FIXED: Use the stable, locked-in base_time if provided ──
+    if base_time is None:
+        base_time = calculate_base_time(file_path, method=timing_method)
+        
     wl, ang = _read_settings_values(settings_xml_path)
 
-    # ── 1. Read and Split Data by Day ────────────────────────────────────────
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
+            all_lines = f.readlines()
+        
+        total_lines = len(all_lines)
+        new_lines = all_lines[line_offset:]
+
+        if not new_lines:
+            return True, total_lines
 
         data_by_day = {}
 
-        for line in lines:
+        for line in new_lines:
             parts = line.strip().split("\t")
             if len(parts) != 2:
                 continue
@@ -139,12 +139,7 @@ def convert_lr_to_epic(file_path, output_base_dir, settings_xml_path, timing_met
             except ValueError:
                 continue
 
-        # Guard checking against completely empty or invalid data matrices
-        if not data_by_day:
-            logging.warning(f"No valid target data structures found inside processed target file: {file_path}")
-            return False
-
-        # ── 2. Write to the respective daily files ───────────────────────────
+        # ── Write Clean Target Logs ──────────────────────────────────────────
         for day_str, info in data_by_day.items():
             dated_output_dir = os.path.join(output_base_dir, info["year"], day_str)
             os.makedirs(dated_output_dir, exist_ok=True)
@@ -154,49 +149,38 @@ def convert_lr_to_epic(file_path, output_base_dir, settings_xml_path, timing_met
 
             with open(output_file_path, 'a', encoding='utf-8') as f:
                 if not file_exists:
-                    f.write("EPIC LR Log File\n")
-                    f.write(f"LaserWavelength_nm: {wl}\n")
-                    f.write(f"IncidenceAngle_deg: {ang}\n\n")
+                    f.write("EPIC LR Log File\n\n")
                     f.write("Date,LR\n")
                 f.writelines(info["lines"])
             
-            logging.info(f"Appended {len(info['lines'])} lines to {output_file_path}")
+            logging.info(f"Appended {len(info['lines'])} new lines to {output_file_path}")
+
+        # Only write metadata summary and copy XML on the initial pass
+        if line_offset == 0:
+            start_day_dir = os.path.join(output_base_dir, base_time.strftime("%Y"), base_time.strftime("%Y_%m_%d"))
+            os.makedirs(start_day_dir, exist_ok=True)
+            
+            meta_log_path = os.path.join(start_day_dir, "LR_meta.txt")
+            meta_exists = os.path.isfile(meta_log_path)
+
+            with open(meta_log_path, 'a', encoding='utf-8') as f_meta:
+                if not meta_exists:
+                    f_meta.write("EPIC LR_metadata Log File\n\n")
+                    f_meta.write("Date,LR_wavelength_nm,LR_angle_deg\n")
+                f_meta.write(f"{base_time.strftime('%d/%m/%Y %H:%M:%S.%f')},{wl},{ang}\n")
+
+            # Backup settings configuration snapshot
+            name_part, _ = os.path.splitext(os.path.basename(file_path))
+            timestamp_str = base_time.strftime("%Y%m%d_%H%M%S")
+            new_meta_name = f"{name_part}_{timestamp_str}_metadata.xml"
+            shutil.copy2(settings_xml_path, os.path.join(os.path.dirname(file_path), new_meta_name))
+            logging.info(f"Created initial experiment metadata log entries and XML snapshot backup for {file_path}")
+
+        return True, total_lines
 
     except Exception as e:
-        logging.error(f"Failed to process multi-day file {file_path}: {e}")
-        return False
-
-    # ── 3. Handle Metadata Log Entry ─────────────────────────────────────────
-    start_day_dir = os.path.join(
-        output_base_dir, 
-        base_time.strftime("%Y"), 
-        base_time.strftime("%Y_%m_%d")
-    )
-    os.makedirs(start_day_dir, exist_ok=True)
-    
-    meta_log_path = os.path.join(start_day_dir, "LR_meta.txt")
-    meta_exists = os.path.isfile(meta_log_path)
-
-    try:
-        with open(meta_log_path, 'a', encoding='utf-8') as f_meta:
-            if not meta_exists:
-                f_meta.write("EPIC LR_metadata Log File\n\n")
-                f_meta.write("Date,LR_wavelength_nm,LR_angle_deg\n")
-            f_meta.write(f"{base_time.strftime('%d/%m/%Y %H:%M:%S.%f')},{wl},{ang}\n")
-    except Exception as e:
-        logging.error(f"Meta log update failed: {e}")
-
-    # ── 4. Robust Universal XML Snapshot Name Calculation ────────────────────
-    try:
-        name_part, _ = os.path.splitext(os.path.basename(file_path))
-        timestamp_str = base_time.strftime("%Y%m%d_%H%M%S")
-        new_meta_name = f"{name_part}_{timestamp_str}_metadata.xml"
-        
-        shutil.copy2(settings_xml_path, os.path.join(os.path.dirname(file_path), new_meta_name))
-    except Exception as e:
-        logging.error(f"XML copy failed: {e}")
-
-    return True
+        logging.error(f"Failed to process file updates for {file_path}: {e}")
+        return False, line_offset
 
 
 class LRMetaDataHandler(FileSystemEventHandler):
@@ -206,10 +190,12 @@ class LRMetaDataHandler(FileSystemEventHandler):
         self.inactivity_period = inactivity_period
         self.timing_method = timing_method
         self.file_timestamps = {}
+        self.file_offsets = {}
+        # ── FIXED: Added persistent base_time cache map to prevent timeline drift ──
+        self.file_base_times = {}
 
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith('.dat'):
-            # Check to ensure we don't track files already moved to the processed subfolder
             if f"{os.sep}processed{os.sep}" in event.src_path:
                 return
             self.file_timestamps[event.src_path] = time.time()
@@ -222,56 +208,85 @@ class LRMetaDataHandler(FileSystemEventHandler):
 
     def check_and_process_files(self):
         current_time = time.time()
+        
+        # ── 1. Read / Process Step ───────────────────────────────────────────
         files_to_process = [
             fp for fp, ts in list(self.file_timestamps.items())
             if current_time - ts > self.inactivity_period
         ]
         for file_path in files_to_process:
-            # Check if file has been manually handled/moved while waiting in the queue
             if not os.path.exists(file_path):
                 self.file_timestamps.pop(file_path, None)
+                self.file_offsets.pop(file_path, None)
+                self.file_base_times.pop(file_path, None)
                 continue
 
-            logging.info(f"Processing background file: {file_path}")
+            current_offset = self.file_offsets.get(file_path, 0)
+            
+            # Lock down and cache a stable base_time on the very first read pass
+            if file_path not in self.file_base_times:
+                self.file_base_times[file_path] = calculate_base_time(file_path, method=self.timing_method)
+            
+            stable_base_time = self.file_base_times[file_path]
+
             try:
-                success = convert_lr_to_epic(
+                success, next_offset = convert_lr_to_epic(
                     file_path=file_path,
                     output_base_dir=self.output_dir,
                     settings_xml_path=self.settings_xml_path,
-                    timing_method=self.timing_method
+                    timing_method=self.timing_method,
+                    line_offset=current_offset,
+                    base_time=stable_base_time
                 )
                 if success:
-                    # Clear the tracking record since processing succeeded
+                    self.file_offsets[file_path] = next_offset
                     self.file_timestamps.pop(file_path, None)
-
-                    source_dir = os.path.dirname(file_path)
-                    archive_dir = os.path.join(source_dir, "processed")
-                    os.makedirs(archive_dir, exist_ok=True)
-                    
-                    destination_path = os.path.join(archive_dir, os.path.basename(file_path))
-                    shutil.move(file_path, destination_path)
-                    logging.info(f"Successfully archived processed data file to: {destination_path}")
-                    # ──────────────────────────────────────────────────────────
+                    logging.info(f"File tracking position advanced to row {next_offset} for {file_path}")
                 else:
-                    # If conversion failed (file busy or locked), reset timer to retry later
                     self.file_timestamps[file_path] = time.time()
-                    logging.warning(f"File processing deferred for {file_path}. Retrying on next check cycle.")
-                    
+                    logging.warning(f"File access deferred for {file_path}. Retrying on next cycle.")
             except Exception as e:
-                logging.error(f"Error processing background file {file_path}: {e}")
+                logging.error(f"Error checking background file entries for {file_path}: {e}")
 
+        # ── 2. Deep Inactivity Archival Clean Sweep ───────────────────────────
+        for tracked_path in list(self.file_offsets.keys()):
+            if tracked_path in self.file_timestamps:
+                continue
+                
+            try:
+                if os.path.exists(tracked_path):
+                    last_mod_time = os.path.getmtime(tracked_path)
+                    if current_time - last_mod_time > ARCHIVE_AGE_THRESHOLD:
+                        # Clear all dictionary entry tracking allocations out of memory
+                        self.file_offsets.pop(tracked_path, None)
+                        self.file_base_times.pop(tracked_path, None)
+                        
+                        source_dir = os.path.dirname(tracked_path)
+                        archive_dir = os.path.join(source_dir, "processed")
+                        os.makedirs(archive_dir, exist_ok=True)
+                        
+                        destination_path = os.path.join(archive_dir, os.path.basename(tracked_path))
+                        shutil.move(tracked_path, destination_path)
+                        
+                        logging.info(f"Deep cleanup: Cleared offset/base_time RAM and archived file to {destination_path}")
+            except Exception as e:
+                logging.error(f"Failed to execute deep archival cleanup for file {tracked_path}: {e}")
+
+
+# Global file descriptor assignment reference to prevent Garbage Collection sweeps
 _holder_lock_fd = None
+
 def main():
+    global _holder_lock_fd
+    
     # ── SINGLE INSTANCE LOCK ──────────────────────────────────────────────────────
     LOCK_FILE = "pdi_lr_watchdog.lock"
 
     try:
-        
         _holder_lock_fd = open(LOCK_FILE, 'ab+')
         if os.name == 'nt':  
             import msvcrt
             try:
-                # Seek to start boundary position to verify cross-process lock mapping
                 _holder_lock_fd.seek(0)
                 msvcrt.locking(_holder_lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
             except IOError:
@@ -289,14 +304,12 @@ def main():
         print(f"Lockfile initialization failed: {e}")
         sys.exit(1)
     # ──────────────────────────────────────────────────────────────────────────────
-    
 
     parser = argparse.ArgumentParser(
         prog="python pdi_lr_watchdog.py",
         description="Convert PDI .dat files to EPIC log format."
     )
     
-    # Modes
     parser.add_argument("-w", action="store_true", help="Run in watchdog mode (monitors folder continuously)")
     
     timing_group = parser.add_mutually_exclusive_group()
@@ -310,12 +323,10 @@ def main():
 
     timing_method = "tm" if args.tm else "tc"
 
-    # ── RULE EVALUATION 1: Running with no parameters at all ──────────────────
     if not args.w and not args.dat_file and not args.xml_file:
         parser.print_help()
         sys.exit(0)
 
-    # ── RULE EVALUATION 2: Watchdog Mode execution path ───────────────────────
     if args.w:
         if args.dat_file or args.xml_file:
             print("Error: Cannot specify explicit file parameters when executing in background daemon mode (-w).")
@@ -323,9 +334,8 @@ def main():
             sys.exit(1)
             
         print(f"Starting watchdog | folder: {DEFAULT_LR_META_DIR} | timing: -{timing_method}")
-        logging.info(f"Started watchdog. Monitoring: {DEFAULT_LR_META_DIR} | timing: -{timing_method}")
+        logging.info(f"Starting watchdog | folder: {DEFAULT_LR_META_DIR} | timing: -{timing_method}")
 
-        
         try:
             event_handler = LRMetaDataHandler(
                 output_dir=DEFAULT_EPIC_LOGS_DIR,
@@ -337,7 +347,6 @@ def main():
             observer.schedule(event_handler, path=DEFAULT_LR_META_DIR, recursive=False)
             observer.start()
 
-            # Fixed #3: Graceful shutdown framework listening loop for manual terminates
             while True:
                 event_handler.check_and_process_files()
                 time.sleep(5)
@@ -351,7 +360,6 @@ def main():
         finally:
             observer.join()
 
-    # ── RULE EVALUATION 3: Manual Conversion Mode execution path ──────────────
     else:
         if not args.dat_file or not args.xml_file:
             print("Error: Manual mode requires both [dat_file] and [xml_file] inputs specified.")
@@ -369,11 +377,12 @@ def main():
         print(f"Settings:   {args.xml_file}")
         print(f"Timing:     -{timing_method}")
         
-        success = convert_lr_to_epic(
+        success, _ = convert_lr_to_epic(
             file_path=args.dat_file,
             output_base_dir=DEFAULT_EPIC_LOGS_DIR,
             settings_xml_path=args.xml_file,
-            timing_method=timing_method
+            timing_method=timing_method,
+            line_offset=0
         )
         if success:
             print("Done.")
