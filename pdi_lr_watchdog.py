@@ -251,8 +251,37 @@ class LRMetaDataHandler(FileSystemEventHandler):
             except Exception as e:
                 logging.error(f"Error processing background file {file_path}: {e}")
 
-
+_holder_lock_fd = None
 def main():
+    # ── SINGLE INSTANCE LOCK ──────────────────────────────────────────────────────
+    LOCK_FILE = "pdi_lr_watchdog.lock"
+
+    try:
+        
+        _holder_lock_fd = open(LOCK_FILE, 'ab+')
+        if os.name == 'nt':  
+            import msvcrt
+            try:
+                # Seek to start boundary position to verify cross-process lock mapping
+                _holder_lock_fd.seek(0)
+                msvcrt.locking(_holder_lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+            except IOError:
+                print(f"\n⚠️ WARNING: This script is already running in another terminal!")
+                print("Please close the other instance before running this one.")
+                sys.exit(1)
+        else:  
+            import fcntl
+            try:
+                fcntl.flock(_holder_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except IOError:
+                print(f"\n⚠️ WARNING: This script is already running in another terminal!")
+                sys.exit(1)
+    except Exception as e:
+        print(f"Lockfile initialization failed: {e}")
+        sys.exit(1)
+    # ──────────────────────────────────────────────────────────────────────────────
+    
+
     parser = argparse.ArgumentParser(
         prog="python pdi_lr_watchdog.py",
         description="Convert PDI .dat files to EPIC log format."
