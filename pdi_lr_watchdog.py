@@ -116,7 +116,7 @@ def convert_lr_to_epic(file_path, output_base_dir, settings_xml_path, timing_met
 
     # ── 1. Read and Split Data by Day ────────────────────────────────────────
     try:
-        with open(file_path, r'r', encoding='utf-8', errors='ignore') as f:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
 
         data_by_day = {}
@@ -206,19 +206,17 @@ class LRMetaDataHandler(FileSystemEventHandler):
         self.inactivity_period = inactivity_period
         self.timing_method = timing_method
         self.file_timestamps = {}
-        # Fixed #1: Track fully processed files to eliminate duplication hazards
-        self.processed_files = set()
 
     def on_created(self, event):
-        # Fixed #2: Track file creation for software engines writing complete logs instantly
         if not event.is_directory and event.src_path.endswith('.dat'):
-            if event.src_path in self.processed_files:
+            # Check to ensure we don't track files already moved to the processed subfolder
+            if f"{os.sep}processed{os.sep}" in event.src_path:
                 return
             self.file_timestamps[event.src_path] = time.time()
 
     def on_modified(self, event):
         if not event.is_directory and event.src_path.endswith('.dat'):
-            if event.src_path in self.processed_files:
+            if f"{os.sep}processed{os.sep}" in event.src_path:
                 return
             self.file_timestamps[event.src_path] = time.time()
 
@@ -229,8 +227,8 @@ class LRMetaDataHandler(FileSystemEventHandler):
             if current_time - ts > self.inactivity_period
         ]
         for file_path in files_to_process:
-            # Re-verify lock status before running thread logic 
-            if file_path in self.processed_files:
+            # Check if file has been manually handled/moved while waiting in the queue
+            if not os.path.exists(file_path):
                 self.file_timestamps.pop(file_path, None)
                 continue
 
@@ -243,11 +241,22 @@ class LRMetaDataHandler(FileSystemEventHandler):
                     timing_method=self.timing_method
                 )
                 if success:
-                    # Lock processing to prevent downstream duplicate loops
-                    self.processed_files.add(file_path)
-                
-                # Fixed #4: Thread safe map eviction
-                self.file_timestamps.pop(file_path, None)
+                    # Clear the tracking record since processing succeeded
+                    self.file_timestamps.pop(file_path, None)
+
+                    source_dir = os.path.dirname(file_path)
+                    archive_dir = os.path.join(source_dir, "processed")
+                    os.makedirs(archive_dir, exist_ok=True)
+                    
+                    destination_path = os.path.join(archive_dir, os.path.basename(file_path))
+                    shutil.move(file_path, destination_path)
+                    logging.info(f"Successfully archived processed data file to: {destination_path}")
+                    # ──────────────────────────────────────────────────────────
+                else:
+                    # If conversion failed (file busy or locked), reset timer to retry later
+                    self.file_timestamps[file_path] = time.time()
+                    logging.warning(f"File processing deferred for {file_path}. Retrying on next check cycle.")
+                    
             except Exception as e:
                 logging.error(f"Error processing background file {file_path}: {e}")
 
